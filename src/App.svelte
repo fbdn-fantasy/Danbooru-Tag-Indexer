@@ -116,10 +116,10 @@
     load: loadOutline,
     copy: copyTag,
     star: starTag,
-    open: (name) => void safely(() => select(name)),
+    open: (name, path = []) => void safely(() => select(name, false, path)),
   };
   let detail: Detail | null = $state(null),
-    trail: Entry[] = $state([]),
+    trail: { name: string; display: string }[] = $state([]),
     back: string[] = $state([]),
     forward: string[] = $state([]),
     recent: string[] = $state([]);
@@ -208,7 +208,7 @@
     await loadTree();
     if (query.trim()) await search();
   }
-  async function select(name: string, history = false, parents: Entry[] = []) {
+  async function select(name: string, history = false, parents: { name: string; display: string }[] = []) {
     const id = ++requestId;
     const [node, page] = await Promise.all([
       api<Detail>("node", { name }),
@@ -219,6 +219,11 @@
       back = [...back, detail.name];
       forward = [];
     }
+    clearTimeout(timer);
+    searchId++;
+    searching = false;
+    query = "";
+    screen = "browse";
     detail = node;
     detailPage = page;
     trail = parents;

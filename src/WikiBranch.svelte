@@ -62,6 +62,16 @@
       if (alive) pending = false;
     }
   }
+  function selectLabel() {
+    if (entry.kind !== "tag") {
+      void toggle();
+      return;
+    }
+    // A tag label selects the main article and also reveals its inline list.
+    // Only the arrow toggles an already-open tag branch closed.
+    if (!opened) void toggle();
+    actions.open(entry.name, trail);
+  }
   async function action(fn: () => Promise<void>) {
     try {
       await fn();
@@ -83,7 +93,7 @@
       class:wiki-heading={entry.kind === "section"}
       class="wiki-label"
       aria-expanded={opened}
-      onclick={() => void toggle()}>{entry.display}</button
+      onclick={selectLabel}>{entry.display}</button
     >
     {#if entry.kind === "tag"}
       <button

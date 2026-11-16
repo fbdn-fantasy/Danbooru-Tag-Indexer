@@ -17,7 +17,7 @@ export type TreeActions = {
   load: (name: string) => Promise<WikiPage>;
   copy: (name: string) => Promise<void>;
   star: (name: string, path: WikiEntry[]) => Promise<void>;
-  open: (name: string) => void;
+  open: (name: string, path?: WikiEntry[]) => void;
 };
 
 // Keep source occurrences in the full wiki, adding only unique preview content.

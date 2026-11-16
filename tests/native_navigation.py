@@ -55,6 +55,10 @@ try:
     toes=feet+' [data-name="toes"]'
     click(toes+'>.wiki-row>.wiki-label')
     wait('return document.querySelector('+json.dumps(toes)+').innerText.includes("Egyptian toe")')
+    wait("return document.querySelector('main article .entry-name')?.textContent==='toes'")
+    assert js("return document.querySelector('main article').innerText.includes('Egyptian toe')")
+    click(toes+'>.wiki-row>.wiki-label')
+    assert js('return document.querySelector(arguments[0]).getAttribute("aria-expanded")=="true"',[toes+'>.wiki-row>.wiki-arrow'])
     text=js('return document.querySelector(arguments[0]).innerText',[toes])
     for value in ['Digits of the','Related tags','Appearance','Actions','See also','Egyptian toe','Long toes','Toe socks','Toe sucking','Prehensile toes','Prehensile feet']: assert value in text,value
     nails=toes+' [data-name="toenails"]'
@@ -62,6 +66,12 @@ try:
     wait('return document.querySelector('+json.dumps(nails)+').innerText.includes("Fingernails")')
     for name in ['long_toenails','sharp_toenails','toenail_polish']:
         assert js('return document.querySelectorAll(arguments[0]).length',[nails+f' [data-name="{name}"]'])==1
+    assert js("return document.querySelector('main article .entry-name').textContent==='toes'")
+    click(nails+'>.wiki-row>.wiki-label')
+    wait("return document.querySelector('main article .entry-name')?.textContent==='toenails'")
+    click(toes+' [data-name="egyptian_toe"]>.wiki-row>.wiki-label')
+    wait("return document.querySelector('main article .entry-name')?.textContent==='egyptian_toe'")
+    screenshot('tag-opens-main-panel.png')
     click(toes+' [data-name="egyptian_toe"]>.wiki-row>.wiki-star')
     wait("return document.querySelector('nav').innerText.includes('Favorites 1')")
     saved=api('favorites')[0]
@@ -79,15 +89,23 @@ try:
     screenshot('toes-search.png')
     # Repeated wiki links stay finite and do not fetch their page again.
     branch='.search-outlines [data-name="toes"] [data-name="greek_toe"]'
-    click(branch+'>.wiki-row>.wiki-label')
+    click(branch+'>.wiki-row>.wiki-arrow')
     repeat=branch+' [data-name="toes"]'
     click(repeat+'>.wiki-row>.wiki-arrow')
     wait('return document.querySelector('+json.dumps(repeat)+').innerText.includes("already expanded above")')
     assert js('return !document.querySelector(arguments[0])',[repeat+'>.wiki-body>.wiki-tree'])
+    click('.search-outlines [data-name="toes"]>.wiki-row>.wiki-label')
+    wait("return document.querySelector('main article .entry-name')?.textContent==='toes' && !document.querySelector('.search-outlines')")
+    click('main article [data-name="toenails"]>.wiki-row>.wiki-label')
+    wait("return document.querySelector('main article .entry-name')?.textContent==='toenails'")
+    js("document.querySelector('[aria-label=\"Back\"]').click()")
+    wait("return document.querySelector('main article .entry-name')?.textContent==='toes'")
+    js("document.querySelector('[aria-label=\"Forward\"]').click()")
+    wait("return document.querySelector('main article .entry-name')?.textContent==='toenails'")
     for page in ['tag_group:ass','tag_group:fighting_games','tag_group:metatags','pool_groups']:
         search(page.replace('_',' '))
         selector='.search-outlines [data-name="'+page+'"]'
-        click(selector+'>.wiki-row>.wiki-label')
+        click(selector+'>.wiki-row>.wiki-arrow')
         wait('return !!document.querySelector('+json.dumps(selector+'>.wiki-body>.wiki-tree>.wiki-branch')+')')
     js("[...document.querySelectorAll('nav button')].find(e=>e.textContent.includes('Favorites')).click()")
     wait("return !!document.querySelector('.favorite-card')")
@@ -99,6 +117,6 @@ try:
     assert api('favorites')[0]==saved
     assert api('job')['status']=='idle'
     assert not list(pathlib.Path(os.environ['XDG_DATA_HOME']).rglob('update.json'))
-    print(json.dumps({'native_navigation':'PASS','checks':['main Body/Face/Hair source order','full Toes via label','Toenails via arrow and unique preview descendants','Toes search expansion and tag filter','star with full browsing path','compact and expanded favorites','outside Visual categories','cycle stopping','copy tag name','offline navigation']},indent=2))
+    print(json.dumps({'native_navigation':'PASS','checks':['tag labels open the main panel from sidebar, search and article lists','arrows expand without changing the main panel','repeated tag labels preserve expansion','back and forward navigation','main Body/Face/Hair source order','full Toes via label','Toenails via arrow and unique preview descendants','Toes search expansion and tag filter','star with full browsing path','compact and expanded favorites','outside Visual categories','cycle stopping','copy tag name','offline navigation']},indent=2))
 finally:
     request('DELETE',prefix)

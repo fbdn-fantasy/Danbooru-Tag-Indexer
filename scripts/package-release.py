@@ -47,7 +47,7 @@ report['catalog_sha256']=digest(root/'src-tauri/resources/codex-v1.sqlite')
 verification=out/'Verification';verification.mkdir(exist_ok=True)
 with zipfile.ZipFile(verification/'Danbooru-Tag-Indexer-5.0.0-verification.zip','w',zipfile.ZIP_DEFLATED,compresslevel=9) as z:
     z.writestr('release-verification.json',json.dumps(report,indent=2))
-    for name in ['test-scoped-rust.log','test-native-final.log','rebuild-scoped.log','build-linux.log','build-windows.log']:
+    for name in ['test-frontend.log','test-scoped-rust.log','test-native-final.log','rebuild-scoped.log','build-linux.log','build-windows.log']:
         p=root/name
         if p.exists():z.write(p,name)
     for p in (root/'test-results').rglob('*'):

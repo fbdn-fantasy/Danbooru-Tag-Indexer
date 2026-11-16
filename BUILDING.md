@@ -60,7 +60,9 @@ npm run tauri -- build --runner cargo-xwin --target x86_64-pc-windows-msvc --con
 
 `navigation.rs` reconstructs each wiki from its stored description and section
 metadata. Category links with explicit children retain those children; other
-categories load their linked wiki on expansion. Real tags load their complete
+categories load their linked wiki on expansion. Tag labels open the main article
+and reveal their inline list; arrows expand or collapse without changing the
+main article. Search-result tag selection exits the results view. Real tags load their complete
 wiki and merge unique preview descendants without synthetic headings. Page
 requests are cached per index version, with per-branch ancestor guards for cycles.
 

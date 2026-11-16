@@ -23,7 +23,9 @@ with tempfile.TemporaryDirectory(prefix='indexer-payloads-') as tmp:
         assert sha(database)==expected,platform
         binary=next((stage/platform).rglob('danbooru-tag-indexer'+('.exe' if platform=='windows' else '')))
         assert binary.stat().st_size>1000000
-        report[platform]={'catalog_sha256':expected,'binary_bytes':binary.stat().st_size}
+        frontend=next((root/'dist/assets').glob('index-*.js')).name
+        assert frontend.encode() in binary.read_bytes(), (platform, 'stale embedded frontend')
+        report[platform]={'catalog_sha256':expected,'binary_bytes':binary.stat().st_size,'frontend':frontend}
     assert next((stage/'windows').rglob('MicrosoftEdgeWebView2RuntimeInstaller.exe')).stat().st_size>100000000
     report['deb']['metadata']=run('dpkg-deb','-f',str(deb),'Package','Version','Architecture','Depends')
     report['rpm']['metadata']=run('rpm','-qp','--queryformat','%{NAME} %{VERSION} %{ARCH}',str(rpm))
