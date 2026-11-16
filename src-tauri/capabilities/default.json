@@ -1,0 +1,12 @@
+{
+  "identifier": "default",
+  "description": "Local encyclopedia window",
+  "windows": ["main"],
+  "permissions": [
+    "core:default", "dialog:allow-open", "dialog:allow-save",
+    {"identifier": "opener:allow-open-url", "allow": [
+      {"url": "https://ko-fi.com/forbidden_fantasy"},
+      {"url": "https://danbooru.donmai.us/*"}
+    ]}
+  ]
+}

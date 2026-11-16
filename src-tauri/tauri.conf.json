@@ -1,0 +1,71 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Danbooru Tag Indexer",
+  "version": "4.0.0",
+  "identifier": "io.tagcodex.desktop",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Danbooru Tag Indexer",
+        "width": 1280,
+        "height": 850,
+        "minWidth": 760,
+        "minHeight": 540,
+        "visible": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost data:; style-src 'self' 'unsafe-inline'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "deb",
+      "rpm"
+    ],
+    "resources": [
+      "resources/codex-v1.sqlite",
+      "../LICENSE"
+    ],
+    "icon": [
+      "icons/icon.png",
+      "icons/icon.ico"
+    ],
+    "shortDescription": "Offline Danbooru tag encyclopedia",
+    "longDescription": "Browse and search a populated offline tag encyclopedia. Network updates run only on explicit request.",
+    "category": "Education",
+    "linux": {
+      "rpm": {
+        "depends": [
+          "webkit2gtk4.1",
+          "gtk3",
+          "glibc >= 2.39",
+          "libgcc",
+          "dbus-libs"
+        ],
+        "obsoletes": [
+          "tag-codex < 3.0.0"
+        ]
+      },
+      "deb": {
+        "section": "education",
+        "depends": [
+          "libwebkit2gtk-4.1-0",
+          "libgtk-3-0t64",
+          "libc6 (>= 2.39)",
+          "libgcc-s1"
+        ]
+      }
+    },
+    "license": "Apache-2.0",
+    "licenseFile": "../LICENSE",
+    "publisher": "Danbooru Tag Indexer"
+  }
+}
