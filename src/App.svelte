@@ -3,6 +3,14 @@
   import { invoke } from "@tauri-apps/api/core";
   import { open, save } from "@tauri-apps/plugin-dialog";
   import { openUrl } from "@tauri-apps/plugin-opener";
+  import WikiTree from "./WikiTree.svelte";
+  import {
+    shortDescription,
+    type WikiEntry,
+    type WikiPage,
+    type Favorite,
+    type TreeActions,
+  } from "./navigation";
   import RichText from "./RichText.svelte";
   import appIcon from "../src-tauri/icons/icon.png";
   import kofiIcon from "./assets/kofi.png";
@@ -46,18 +54,70 @@
     elapsed?: number;
     failures?: { at: string; message: string }[];
   };
-  type Row = {
-    entry: Entry;
-    depth: number;
-    key: string;
-    cycle: boolean;
-    trail: Entry[];
-  };
   let snapshots: Snapshot[] = $state([]),
     version = $state(0),
-    roots: Entry[] = $state([]),
-    cache: Record<string, Entry[]> = $state({}),
-    expanded: Set<string> = $state(new Set());
+    roots: WikiEntry[] = $state([]);
+  let treeCommand = $state({ serial: 0, open: false }),
+    treeGeneration = $state(0);
+  let outlineCache = new Map<string, Promise<WikiPage>>();
+  let detailPage: WikiPage = $state({ description: "", entries: [] });
+  let favorites: Favorite[] = $state([]),
+    favoriteQuery = $state("");
+  let favoriteBusy = new Set<string>();
+  const stars = $derived(new Set(favorites.map((f) => f.name)));
+  const favoriteRows = $derived(
+    favorites.filter((f) =>
+      (
+        f.name +
+        " " +
+        f.display +
+        " " +
+        f.description +
+        " " +
+        f.paths
+          .flat()
+          .map((p) => p.display)
+          .join(" ")
+      )
+        .toLowerCase()
+        .includes(favoriteQuery.toLowerCase()),
+    ),
+  );
+  async function loadOutline(name: string): Promise<WikiPage> {
+    const key = `${version}:${name}`;
+    if (!outlineCache.has(key))
+      outlineCache.set(
+        key,
+        api<WikiPage>("outline", { name }).catch((e) => {
+          outlineCache.delete(key);
+          throw e;
+        }),
+      );
+    return outlineCache.get(key)!;
+  }
+  async function copyTag(name: string) {
+    await navigator.clipboard.writeText(name.replaceAll("_", " "));
+    notice = "Copied " + name.replaceAll("_", " ");
+  }
+  async function starTag(name: string, path: WikiEntry[] = []) {
+    if (favoriteBusy.has(name)) return;
+    favoriteBusy.add(name);
+    try {
+      favorites = await api<Favorite[]>("favorite", {
+        name,
+        path,
+        remove: stars.has(name),
+      });
+    } finally {
+      favoriteBusy.delete(name);
+    }
+  }
+  const treeActions: TreeActions = {
+    load: loadOutline,
+    copy: copyTag,
+    star: starTag,
+    open: (name) => void safely(() => select(name)),
+  };
   let detail: Detail | null = $state(null),
     trail: Entry[] = $state([]),
     back: string[] = $state([]),
@@ -91,11 +151,7 @@
     confirmMessage = $state(""),
     overwrite = $state(false),
     activateImport = $state(false);
-  let scrollTop = $state(0),
-    treeElement: HTMLDivElement | undefined = $state(),
-    sidebar = $state(320),
-    expanding = $state(false),
-    pageLimit = $state(100);
+  let sidebar = $state(320);
   let requestId = 0,
     treeId = 0,
     searchId = 0;
@@ -104,45 +160,6 @@
   const selectedSnapshot = $derived(
     snapshots.find((s) => (version ? s.version === version : s.current)),
   );
-  const rows: Row[] = $derived.by(() => {
-    const out: Row[] = [];
-    const stack = roots
-      .slice()
-      .reverse()
-      .map((entry) => ({
-        entry,
-        depth: 0,
-        key: entry.name,
-        cycle: false,
-        trail: [] as Entry[],
-      }));
-    while (stack.length && out.length < 30000) {
-      const row = stack.pop()!;
-      out.push(row);
-      if (expanded.has(row.key) && !row.cycle) {
-        const children = cache[row.entry.name] || [];
-        const ancestors = [...row.trail, row.entry];
-        for (let i = children.length - 1; i >= 0; i--) {
-          const child = children[i];
-          stack.push({
-            entry: child,
-            depth: row.depth + 1,
-            key: row.key + "\0" + child.name,
-            cycle: ancestors.some((n) => n.name === child.name),
-            trail: ancestors,
-          });
-        }
-      }
-    }
-    return out;
-  });
-  const visible = $derived(
-    rows.slice(
-      Math.max(0, Math.floor(scrollTop / 38) - 8),
-      Math.floor(scrollTop / 38) + 36,
-    ),
-  );
-  const rowStart = $derived(Math.max(0, Math.floor(scrollTop / 38) - 8));
   async function api<T>(
     op: string,
     args: Record<string, unknown> = {},
@@ -171,19 +188,16 @@
   async function loadTree() {
     const id = ++treeId;
     requestId++;
-    const next = await api<Entry[]>("children", { name: "" });
+    outlineCache = new Map();
+    const next = await loadOutline("tag_groups");
     if (id !== treeId) return;
-    roots = next;
-    cache = {};
-    expanded = new Set();
-    scrollTop = 0;
-    if (treeElement) treeElement.scrollTop = 0;
+    roots = next.entries;
+    treeGeneration++;
   }
   async function switchVersion(v: number) {
     clearTimeout(timer);
     searchId++;
     searching = false;
-    expanding = false;
     version = v;
     detail = null;
     trail = [];
@@ -196,17 +210,20 @@
   }
   async function select(name: string, history = false, parents: Entry[] = []) {
     const id = ++requestId;
-    const node = await api<Detail>("node", { name });
+    const [node, page] = await Promise.all([
+      api<Detail>("node", { name }),
+      loadOutline(name),
+    ]);
     if (id !== requestId) return;
     if (detail && !history && detail.name !== name) {
       back = [...back, detail.name];
       forward = [];
     }
     detail = node;
+    detailPage = page;
     trail = parents;
     editing = false;
     draft = node.description;
-    pageLimit = 100;
     recent = [name, ...recent.filter((n) => n !== name)].slice(0, 12);
     localStorage.setItem("recent", JSON.stringify(recent));
   }
@@ -222,65 +239,6 @@
       if (detail) back = [...back, detail.name];
     }
     await select(name, true);
-  }
-  async function toggle(row: Row) {
-    if (row.cycle) return;
-    if (expanded.has(row.key)) {
-      expanded = new Set([...expanded].filter((k) => k !== row.key));
-      return;
-    }
-    const generation = treeId;
-    if (!cache[row.entry.name]) {
-      const children = await api<Entry[]>("children", { name: row.entry.name });
-      if (generation !== treeId) return;
-      cache = { ...cache, [row.entry.name]: children };
-    }
-    expanded = new Set([...expanded, row.key]);
-  }
-  async function expandAll() {
-    if (expanding) {
-      expanding = false;
-      return;
-    }
-    expanding = true;
-    const generation = treeId;
-    const queue = roots.map((entry) => ({
-      entry,
-      key: entry.name,
-      ancestors: [] as string[],
-    }));
-    let processed = 0;
-    try {
-      while (
-        queue.length &&
-        expanding &&
-        generation === treeId &&
-        processed < 1500
-      ) {
-        const row = queue.shift()!;
-        if (row.ancestors.includes(row.entry.name)) continue;
-        if (!cache[row.entry.name]) {
-          const children = await api<Entry[]>("children", { name: row.entry.name });
-          if (generation !== treeId || !expanding) break;
-          cache = { ...cache, [row.entry.name]: children };
-        }
-        if (generation !== treeId) break;
-        expanded = new Set([...expanded, row.key]);
-        processed++;
-        for (const entry of cache[row.entry.name])
-          if (entry.children || entry.kind !== "tag")
-            queue.push({
-              entry,
-              key: row.key + "\0" + entry.name,
-              ancestors: [...row.ancestors, row.entry.name],
-            });
-      }
-      if (queue.length && processed === 1500)
-        notice =
-          "Expanded 1,500 branches. Expand individual folders to continue; the full hierarchy remains available.";
-    } finally {
-      expanding = false;
-    }
   }
   async function search() {
     const id = ++searchId;
@@ -357,6 +315,8 @@
   async function saveDescription() {
     if (!detail) return;
     await api("edit", { name: detail.name, description: draft });
+    outlineCache.clear();
+    treeGeneration++;
     await select(detail.name, true);
   }
   async function create() {
@@ -400,12 +360,15 @@
     theme = localStorage.getItem("theme") === "light" ? "light" : "dark";
     try {
       const stored = JSON.parse(localStorage.getItem("recent") || "[]");
-      recent = Array.isArray(stored) ? stored.filter((x): x is string => typeof x === "string").slice(0, 12) : [];
+      recent = Array.isArray(stored)
+        ? stored.filter((x): x is string => typeof x === "string").slice(0, 12)
+        : [];
     } catch {
       recent = [];
     }
     void safely(async () => {
       await refresh();
+      favorites = await api<Favorite[]>("favorites");
       await loadTree();
       job = await api<Job>("job");
     }).finally(async () => {
@@ -439,13 +402,23 @@
     <div class="brand">
       <img class="mark" src={appIcon} alt="" />
       <div>
-        <strong>Danbooru Tag Indexer</strong><small>THE OFFLINE ENCYCLOPEDIA</small>
+        <strong>Danbooru Tag Indexer</strong><small
+          >THE OFFLINE ENCYCLOPEDIA</small
+        >
       </div>
     </div>
     <nav>
       <button
         class:chosen={screen === "browse"}
         onclick={() => (screen = "browse")}>Encyclopedia</button
+      ><button
+        class:chosen={screen === "favorites"}
+        onclick={() => {
+          screen = "favorites";
+          void safely(async () => {
+            favorites = await api<Favorite[]>("favorites");
+          });
+        }}>Favorites <small>{favorites.length}</small></button
       ><button
         class:chosen={screen === "history"}
         onclick={() => {
@@ -458,7 +431,8 @@
       <button
         class="support"
         title="Support Me on Ko-fi (opens in your browser)"
-        onclick={() => void safely(() => openUrl("https://ko-fi.com/forbidden_fantasy"))}
+        onclick={() =>
+          void safely(() => openUrl("https://ko-fi.com/forbidden_fantasy"))}
         ><img src={kofiIcon} alt="" />Support Me</button
       ><button
         title="Toggle theme"
@@ -543,51 +517,25 @@
           }}
         />
         <div class="tree-actions">
-          <button onclick={() => void safely(expandAll)}
-            >{expanding ? "Stop expanding" : "Expand all"}</button
-          ><button
-            onclick={() => {
-              expanding = false;
-              expanded = new Set();
-              scrollTop = 0;
-              if (treeElement) treeElement.scrollTop = 0;
-            }}>Collapse all</button
+          <button
+            onclick={() =>
+              (treeCommand = { serial: treeCommand.serial + 1, open: true })}
+            >Expand loaded</button
+          >
+          <button
+            onclick={() =>
+              (treeCommand = { serial: treeCommand.serial + 1, open: false })}
+            >Collapse all</button
           >
         </div>
-        <div
-          class="tree"
-          bind:this={treeElement}
-          onscroll={(e) => (scrollTop = e.currentTarget.scrollTop)}
-        >
-          <div style={`height:${rows.length * 38}px;position:relative`}>
-            {#each visible as row, i (row.key)}<div
-                class:selected={detail?.name === row.entry.name}
-                class="tree-row"
-                style={`top:${(rowStart + i) * 38}px;padding-left:${12 + row.depth * 18}px`}
-              >
-                <button
-                  class="chevron"
-                  aria-label={`Expand ${row.entry.display}`}
-                  disabled={row.cycle}
-                  onclick={() => void safely(() => toggle(row))}
-                  >{row.cycle
-                    ? "↩"
-                    : expanded.has(row.key)
-                      ? "⌄"
-                      : row.entry.children || row.entry.kind !== "tag"
-                        ? "›"
-                        : "·"}</button
-                ><button
-                  class="tree-label"
-                  title={row.entry.display}
-                  onclick={() =>
-                    void safely(() => select(row.entry.name, false, row.trail))}
-                  ><span class="folder"
-                    >{row.entry.kind === "tag" ? "#" : "◇"}</span
-                  >{row.entry.display}</button
-                >
-              </div>{/each}
-          </div>
+        <div class="tree">
+          {#key treeGeneration}<WikiTree
+              entries={roots}
+              actions={treeActions}
+              {stars}
+              command={treeCommand}
+              ancestors={["tag_groups"]}
+            />{/key}
         </div>
         <footer>
           <span>Stored on this device</span><button
@@ -614,17 +562,17 @@
                 ? "Searching…"
                 : `${hits.length} matching entries${hits.length >= 80 ? " · refine your query for more precise results" : ""}`}
             </p>
-            <div class="result-grid">
-              {#each hits as hit}<button
-                  onclick={() =>
-                    void safely(async () => {
-                      await select(hit.name);
-                      query = "";
-                      filter = "";
-                      hits = [];
-                    })}
-                  ><span>{hit.display}</span><small>{hit.kind}</small></button
-                >{/each}
+            <div class="search-outlines">
+              {#key `${treeGeneration}:${query}:${kind}`}<WikiTree
+                  entries={hits.map((h) => ({
+                    ...h,
+                    entries: [],
+                    description: "",
+                    note: "",
+                  }))}
+                  actions={treeActions}
+                  {stars}
+                />{/key}
             </div>
           </section>
         {:else if detail}<div class="breadcrumbs">
@@ -645,6 +593,15 @@
             </div>
             <div class="title-row">
               <h1>{detail.display}</h1>
+              {#if detail.kind === "tag"}<button
+                  onclick={() => void safely(() => copyTag(detail!.name))}
+                  >Copy</button
+                ><button
+                  aria-label={`${stars.has(detail.name) ? "Unstar" : "Star"} ${detail.display}`}
+                  aria-pressed={stars.has(detail.name)}
+                  onclick={() => void safely(() => starTag(detail!.name))}
+                  >{stars.has(detail.name) ? "★" : "☆"}</button
+                >{/if}
               <button
                 onclick={() => {
                   editing = !editing;
@@ -677,34 +634,19 @@
                         },
                       )}>Revert to original</button
                   >{/if}
-              </div>{:else}<RichText
-                text={detail.description}
-                onOpen={(name) => void safely(() => select(name))}
-              />{/if}
-            {#each [{ label: "Parent categories", entries: detail.parents }, { label: "Child categories & tags", entries: detail.children }, { label: "Related tags", entries: detail.related }, { label: "Cross-references", entries: detail.crossReferences }] as group}{#if group.entries.length}<section
-                  class="links-section"
-                >
-                  <h3>{group.label}<small>{group.entries.length}</small></h3>
-                  <div class="chips">
-                    {#each group.entries.slice(0, pageLimit) as entry}<button
-                        onclick={() =>
-                          void safely(() =>
-                            select(
-                              entry.name,
-                              false,
-                              group.label === "Child categories & tags"
-                                ? [...trail, detail as unknown as Entry]
-                                : [],
-                            ),
-                          )}
-                        >{entry.kind === "tag" ? "#" : "◇"}
-                        {entry.display}</button
-                      >{/each}
-                  </div>
-                  {#if group.entries.length > pageLimit}<button
-                      onclick={() => (pageLimit += 200)}>Show more</button
-                    >{/if}
-                </section>{/if}{/each}
+              </div>{:else}
+              {#if detailPage.description}<RichText
+                  text={detailPage.description}
+                  onOpen={(name) => void safely(() => select(name))}
+                />{/if}
+              {#key `${treeGeneration}:${detail.name}:${detail.description}`}<WikiTree
+                  entries={detailPage.entries}
+                  actions={treeActions}
+                  {stars}
+                  ancestors={[detail.name]}
+                  openSections={true}
+                />{/key}
+            {/if}
             <details class="custom-tools">
               <summary>Custom relationships</summary>
               <p class="muted">
@@ -786,7 +728,7 @@
               {#each roots.filter((r) => !r.name.includes("#intro")) as root}<button
                   onclick={() => void safely(() => select(root.name))}
                   ><span>◇</span><strong>{root.display}</strong><small
-                    >{root.children} branches →</small
+                    >{root.entries.length} branches →</small
                   ></button
                 >{/each}
             </div>
@@ -804,6 +746,58 @@
           </section>{/if}
       </main>
     </div>
+  {:else if screen === "favorites"}
+    <main class="favorites">
+      <div class="eyebrow">YOUR SAVED TAGS</div>
+      <h1>Favorites</h1>
+      <input
+        aria-label="Search favorites"
+        placeholder="Search saved tags, descriptions, or folders…"
+        bind:value={favoriteQuery}
+      />
+      {#if !favoriteRows.length}<p class="muted">
+          {favoriteQuery
+            ? "No saved tags match your search."
+            : "Star tags while browsing or searching to keep them here."}
+        </p>{/if}
+      {#each favoriteRows as favorite (favorite.name)}
+        <article class="favorite-card" data-name={favorite.name}>
+          <div class="favorite-actions">
+            <button
+              aria-label={`Copy ${favorite.display}`}
+              onclick={() => void safely(() => copyTag(favorite.name))}
+              >Copy</button
+            ><button
+              class="starred"
+              aria-label={`Unstar ${favorite.display}`}
+              onclick={() => void safely(() => starTag(favorite.name))}
+              >★</button
+            >
+          </div>
+          <details>
+            <summary
+              ><strong>{favorite.display}</strong><span class="favorite-summary"
+                >{shortDescription(favorite.description) ||
+                  "No description was recorded."}</span
+              ></summary
+            >
+            <div class="favorite-details">
+              {#each favorite.paths as path}<p class="favorite-path">
+                  {path.map((p) => p.display).join(" › ")}
+                </p>{/each}
+              <RichText
+                text={favorite.description}
+                onOpen={(name) => {
+                  screen = "browse";
+                  query = "";
+                  void safely(() => select(name));
+                }}
+              />
+            </div>
+          </details>
+        </article>
+      {/each}
+    </main>
   {:else}
     <main class="history">
       <div class="eyebrow">LOCAL VERSION HISTORY</div>

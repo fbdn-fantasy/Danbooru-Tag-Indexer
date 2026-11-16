@@ -4,8 +4,9 @@
 )]
 
 mod catalog;
-mod window_state;
 mod indexer;
+mod navigation;
+mod window_state;
 use std::sync::Arc;
 use tauri::Manager;
 // Geometry is restored while the window is hidden.
@@ -92,4 +93,3 @@ fn main() {
         .run(tauri::generate_context!())
         .expect("Could not run Danbooru Tag Indexer");
 }
-

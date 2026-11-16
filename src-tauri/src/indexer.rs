@@ -295,13 +295,15 @@ impl Parser {
         Self {
             link: Regex::new(r"\[\[([^\[\]|]+)(?:\|([^\[\]]*))?\]\]").unwrap(),
             heading: Regex::new(r"(?i)^h([1-6])(?:#([A-Za-z0-9_-]+))?\.\s*(.*)$").unwrap(),
-            bullet: Regex::new(r"^(\*+)\s+(.*)$").unwrap(),
+            bullet: Regex::new(r"^([*#]+)\s+(.*)$").unwrap(),
             expand: Regex::new(r"(?i)\[/?expand(?:=[^\]]*)?\]").unwrap(),
             media: Regex::new(r"!(?:post|asset)\s*#\d+:?").unwrap(),
             format: Regex::new(r"\[/?[a-z][a-z0-9]*(?:=[^\]]*)?\]").unwrap(),
             slug: Regex::new(r"[^a-z0-9]+").unwrap(),
-            external: Regex::new(r#""([^"]+)":(?:https?://[^/\s]+)?/wiki_pages/([^#?\s]+)"#)
-                .unwrap(),
+            external: Regex::new(
+                r#""([^"]+)":\[?(?:https?://[^/\s]+)?/wiki_pages/([^#?\]\s]+)(?:#[^\]\s]+)?\]?"#,
+            )
+            .unwrap(),
         }
     }
     fn links(&self, s: &str) -> Vec<String> {
@@ -400,9 +402,20 @@ impl Parser {
                     child: key.clone(),
                     kind: mode.clone(),
                 });
+                // A mixed heading can mention wiki tags without itself being
+                // a tag link. Index those targets so its links remain usable.
+                for linked in links {
+                    if linked != key {
+                        p.edges.push(Edge {
+                            parent: key.clone(),
+                            child: linked,
+                            kind: "xref".into(),
+                        });
+                    }
+                }
                 stack.push((key, level, mode));
                 lists.clear();
-                p.rich += &format!("## {}\n", self.clean(title));
+                p.rich += &format!("{} {}\n", "#".repeat(level as usize), self.clean(title));
                 continue;
             }
             if let Some(b) = self.bullet.captures(line) {
@@ -472,6 +485,7 @@ fn ensure(
     db: &Connection,
     raw: &Connection,
     parser: &Parser,
+    scope: &HashSet<String>,
     ids: &mut HashMap<String, i64>,
     name: &str,
     display: Option<&str>,
@@ -479,14 +493,17 @@ fn ensure(
     if let Some(id) = ids.get(name) {
         return Ok(*id);
     }
-    let rec: Option<(i64, String, Option<String>, String)> = raw
-        .query_row(
+    let rec: Option<(i64, String, Option<String>, String)> = if scope.contains(name) {
+        raw.query_row(
             "SELECT wiki_id,body,updated_at,other_names FROM raw_wiki WHERE title=?",
             [name],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .optional()
-        .map_err(err)?;
+        .map_err(err)?
+    } else {
+        None
+    };
     let section = name.starts_with("section:");
     let kind = if section {
         "section"
@@ -530,8 +547,55 @@ pub fn build(
     db.execute_batch(SCHEMA).map_err(err)?;
     let parser = Parser::new();
     let mut ids = HashMap::new();
+    // The catalog is rooted in tag_groups, including recursively listed tag
+    // wikis. Unrelated downloaded articles and prose-only mentions are not
+    // imported as full wiki pages.
+    let mut scope = HashSet::new();
+    let mut pending = VecDeque::from(["tag_groups".to_string()]);
+    let mut queue = VecDeque::new();
+    while let Some(name) = pending.pop_front() {
+        if !scope.insert(name.clone()) {
+            continue;
+        }
+        check()?;
+        queue.push_back(name.clone());
+        let body: Option<String> = raw
+            .query_row("SELECT body FROM raw_wiki WHERE title=?", [&name], |r| {
+                r.get(0)
+            })
+            .optional()
+            .map_err(err)?;
+        if let Some(body) = body {
+            let rich = parser.parse(&name, &body).rich;
+            for line in rich.lines().map(str::trim) {
+                let standalone = line.starts_with("[[")
+                    && parser.link.find(line).is_some_and(|m| {
+                        let tail = line[m.end()..].trim();
+                        tail.is_empty()
+                            || tail.starts_with('(')
+                            || tail.starts_with(',')
+                            || tail.starts_with('/')
+                            || tail.starts_with("or ")
+                            || tail.starts_with("and ")
+                    });
+                if line.starts_with("- ")
+                    || line.starts_with('#')
+                    || line.starts_with('|')
+                    || standalone
+                {
+                    for linked in parser.links(line) {
+                        if !scope.contains(&linked) {
+                            pending.push_back(linked);
+                        }
+                    }
+                }
+            }
+        }
+        if scope.len() % 1000 == 0 {
+            progress(scope.len(), 0);
+        }
+    }
     let mut visited = HashSet::new();
-    let mut queue = VecDeque::from(["tag_groups".to_string()]);
     let mut positions: HashMap<(i64, String), i64> = HashMap::new();
     db.execute_batch("BEGIN").map_err(err)?;
     while let Some(name) = queue.pop_front() {
@@ -539,7 +603,7 @@ pub fn build(
             continue;
         }
         check()?;
-        let id = ensure(&db, raw, &parser, &mut ids, &name, None)?;
+        ensure(&db, raw, &parser, &scope, &mut ids, &name, None)?;
         let body: Option<String> = raw
             .query_row("SELECT body FROM raw_wiki WHERE title=?", [&name], |r| {
                 r.get(0)
@@ -548,32 +612,16 @@ pub fn build(
             .map_err(err)?;
         let Some(body) = body else { continue };
         let p = parser.parse(&name, &body);
-        let article = p.chars > 700 && p.chars > p.bullets * 40;
-        let expand = index_title(&name)
-            || (!article && p.bullets >= 8 && p.linked as f64 / p.bullets as f64 >= 0.45);
-        if expand {
-            db.execute("UPDATE nodes SET kind='group' WHERE id=?", [id])
-                .map_err(err)?;
-        }
-        // Section identities and their children must survive on descriptive articles too.
+        // A tag with lists is still a tag. All source sections belong to its
+        // wiki, including Related tags and See also on descriptive articles.
         for (key, display) in &p.sections {
-            if expand {
-                ensure(&db, raw, &parser, &mut ids, key, Some(display))?;
-            }
+            ensure(&db, raw, &parser, &scope, &mut ids, key, Some(display))?;
         }
         for edge in p.edges {
-            let section = edge.child.starts_with("section:");
-            if !expand && (edge.kind == "child" || section) {
-                continue;
-            }
-            let child = ensure(&db, raw, &parser, &mut ids, &edge.child, None)?;
-            let parent = if expand {
-                match ids.get(&edge.parent) {
-                    Some(p) => *p,
-                    None => ensure(&db, raw, &parser, &mut ids, &edge.parent, None)?,
-                }
-            } else {
-                id
+            let child = ensure(&db, raw, &parser, &scope, &mut ids, &edge.child, None)?;
+            let parent = match ids.get(&edge.parent) {
+                Some(p) => *p,
+                None => ensure(&db, raw, &parser, &scope, &mut ids, &edge.parent, None)?,
             };
             if parent == child {
                 continue;
@@ -581,20 +629,19 @@ pub fn build(
             let pos = positions.entry((parent, edge.kind.clone())).or_default();
             db.execute("INSERT OR IGNORE INTO edges(parent_id,child_id,edge_type,position) VALUES(?1,?2,?3,?4)",params![parent,child,edge.kind,*pos]).map_err(err)?;
             *pos += 1;
-            if expand && edge.kind == "child" && !section && !visited.contains(&edge.child) {
-                queue.push_back(edge.child)
-            }
         }
         if visited.len() % 250 == 0 {
             db.execute_batch("COMMIT;BEGIN").map_err(err)?;
             progress(visited.len(), ids.len());
         }
     }
-    db.execute_batch("COMMIT;UPDATE nodes SET kind='group' WHERE kind='tag' AND id IN(SELECT parent_id FROM edges WHERE edge_type='child');UPDATE nodes SET child_count=(SELECT count(*) FROM edges WHERE parent_id=nodes.id AND edge_type='child');UPDATE nodes SET links_text=coalesce((SELECT group_concat(n.name,' ') FROM edges e JOIN nodes n ON n.id=e.child_id WHERE e.parent_id=nodes.id),'');CREATE VIRTUAL TABLE nodes_fts USING fts5(name,display_name,description,links_text,other_names,content='nodes',content_rowid='id',tokenize='unicode61 remove_diacritics 2');INSERT INTO nodes_fts(nodes_fts) VALUES('rebuild');").map_err(err)?;
+    db.execute_batch("COMMIT;UPDATE nodes SET child_count=(SELECT count(*) FROM edges WHERE parent_id=nodes.id AND edge_type='child');UPDATE nodes SET links_text=coalesce((SELECT group_concat(n.name,' ') FROM edges e JOIN nodes n ON n.id=e.child_id WHERE e.parent_id=nodes.id),'');CREATE VIRTUAL TABLE nodes_fts USING fts5(name,display_name,description,links_text,other_names,content='nodes',content_rowid='id',tokenize='unicode61 remove_diacritics 2');INSERT INTO nodes_fts(nodes_fts) VALUES('rebuild');").map_err(err)?;
     check()?;
     let c = counts(&db)?;
     for (k, v) in [
         ("schema", "1".to_string()),
+        ("outline_format", "headings-v2".to_string()),
+        ("scope", "tag_groups-listed-links".to_string()),
         ("built_at", now()),
         (
             "source",
@@ -633,6 +680,49 @@ mod tests {
     fn root_see_also_structural() {
         let p = Parser::new().parse("tag_groups", "h2. See also\n* [[pool_groups]]");
         assert!(p.edges.iter().all(|e| e.kind == "child"));
+    }
+    #[test]
+    fn ordered_lists_and_bracketed_wiki_urls_are_imported() {
+        let parsed=Parser::new().parse("example","h4. Listed tags\n# [[one]]\n## [[two]]\n* \"Prehensile toes\":[/wiki_pages/prehensile_toes]");
+        assert!(parsed
+            .rich
+            .contains("#### Listed tags\n- [[one|one]]\n  - [[two|two]]"));
+        assert!(parsed.edges.iter().any(|e| e.child == "prehensile_toes"));
+    }
+    #[test]
+    fn all_listed_tag_wikis_are_imported_but_unrelated_articles_are_excluded() {
+        let tmp = tempfile::tempdir().unwrap();
+        let raw = Connection::open_in_memory().unwrap();
+        raw.execute_batch("CREATE TABLE raw_wiki(title TEXT,wiki_id INTEGER,body TEXT,updated_at TEXT,other_names TEXT); INSERT INTO raw_wiki VALUES('tag_groups',1,'* [[visible]]',NULL,'[]'),('visible',2,'h4. Related tags\n* [[nested_tag]]',NULL,'[]'),('nested_tag',3,'h4. See also\n* [[final_tag]]',NULL,'[]'),('unrelated_article',4,'Unrelated wiki article',NULL,'[]');").unwrap();
+        let path = tmp.path().join("catalog.sqlite");
+        build(&raw, &path, || Ok(()), |_, _| {}).unwrap();
+        let db = Connection::open(path).unwrap();
+        assert!(db
+            .query_row(
+                "SELECT description FROM nodes WHERE name='visible'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap()
+            .contains("nested_tag"));
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM nodes WHERE name='final_tag'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM nodes WHERE name='unrelated_article'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
     }
     #[test]
     fn graph_handles_deep_multiple_parents() {

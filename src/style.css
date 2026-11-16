@@ -773,14 +773,155 @@ td .actions button {
 }
 
 @media (max-width: 1080px) {
-  header { gap: 12px; padding: 0 16px; }
-  .brand { min-width: 0; }
-  .brand strong { font-size: 19px; max-width: 220px; }
-  .header-actions { gap: 6px; }
+  header {
+    gap: 12px;
+    padding: 0 16px;
+  }
+  .brand {
+    min-width: 0;
+  }
+  .brand strong {
+    font-size: 19px;
+    max-width: 220px;
+  }
+  .header-actions {
+    gap: 6px;
+  }
 }
 
 @media (max-width: 880px) {
-  header { height: auto; min-height: 82px; flex-wrap: wrap; gap: 6px 16px; padding: 12px 16px; }
-  .brand { flex: 1; }
-  .header-actions { margin-left: 0; }
+  header {
+    height: auto;
+    min-height: 82px;
+    flex-wrap: wrap;
+    gap: 6px 16px;
+    padding: 12px 16px;
+  }
+  .brand {
+    flex: 1;
+  }
+  .header-actions {
+    margin-left: 0;
+  }
+}
+
+.wiki-tree {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.wiki-branch {
+  min-width: 0;
+}
+.wiki-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 36px;
+}
+.wiki-row button {
+  border: 0;
+  background: transparent;
+  padding: 6px 4px;
+}
+.wiki-arrow {
+  width: 24px;
+  flex-shrink: 0;
+}
+.wiki-label {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+.wiki-heading {
+  font-weight: 700;
+}
+.wiki-body {
+  margin-left: 18px;
+  border-left: 1px solid var(--border);
+  padding-left: 10px;
+}
+.wiki-body > .rich {
+  font-size: 13px;
+  margin: 8px 0 12px;
+}
+.wiki-note {
+  font-size: 12px;
+  color: var(--muted);
+  padding-left: 28px;
+}
+.wiki-copy {
+  font-size: 11px;
+  color: var(--muted);
+}
+.wiki-star {
+  font-size: 18px;
+}
+.starred {
+  color: var(--accent);
+}
+.tree > .wiki-tree {
+  padding: 4px 8px;
+}
+.tree .wiki-label {
+  font-size: 12px;
+}
+.tree .wiki-body {
+  margin-left: 10px;
+  padding-left: 6px;
+}
+.tree .wiki-copy {
+  font-size: 10px;
+}
+.tree .rich {
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+.favorites {
+  max-width: 1100px;
+  width: 100%;
+  margin: 0 auto;
+  overflow: auto;
+}
+.favorites > input {
+  width: 100%;
+  margin: 4px 0 20px;
+}
+.favorite-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 14px 16px;
+  margin: 10px 0;
+}
+.favorite-actions {
+  float: right;
+  display: flex;
+  gap: 8px;
+}
+.favorite-card summary {
+  cursor: pointer;
+  padding-right: 110px;
+}
+.favorite-summary {
+  display: block;
+  margin: 7px 0 0 17px;
+  color: var(--muted);
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.favorite-card details[open] .favorite-summary {
+  display: none;
+}
+.favorite-details {
+  padding: 8px 0 0 17px;
+  clear: both;
+}
+.favorite-path {
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
 }

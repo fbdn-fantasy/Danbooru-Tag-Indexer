@@ -44,12 +44,17 @@ impl App {
         })?;
         let registry = Connection::open(dir.join("catalog.sqlite")).map_err(err)?;
         registry.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS snapshots(version INTEGER PRIMARY KEY,label TEXT,created TEXT,protected INTEGER,current INTEGER,file TEXT UNIQUE); CREATE TABLE IF NOT EXISTS custom(name TEXT PRIMARY KEY,display TEXT,kind TEXT,description TEXT); CREATE TABLE IF NOT EXISTS edits(name TEXT PRIMARY KEY,description TEXT); CREATE TABLE IF NOT EXISTS custom_edges(parent TEXT,child TEXT,kind TEXT,PRIMARY KEY(parent,child,kind)); PRAGMA user_version=1;").map_err(err)?;
+        registry
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS favorites(name TEXT PRIMARY KEY,record TEXT NOT NULL); CREATE TABLE IF NOT EXISTS app_migrations(name TEXT PRIMARY KEY);",
+            )
+            .map_err(err)?;
         let count: i64 = registry
             .query_row("SELECT count(*) FROM snapshots", [], |r| r.get(0))
             .map_err(err)?;
         if count == 0 {
             validate(&seed)?;
-            fs::copy(seed, dir.join("versions/v1.sqlite")).map_err(err)?;
+            fs::copy(&seed, dir.join("versions/v1.sqlite")).map_err(err)?;
             registry
                 .execute(
                     "INSERT INTO snapshots VALUES(1,'Version 1',?1,0,1,'v1.sqlite')",
@@ -64,7 +69,7 @@ impl App {
         if ["fetch", "build", "validate"].contains(&text(&job, "status")) {
             job["status"] = json!("interrupted");
         }
-        Ok(Self {
+        let app = Self {
             _lock: lock,
             #[cfg(test)]
             endpoint: Mutex::new(None),
@@ -73,7 +78,51 @@ impl App {
             job: Mutex::new(job),
             control: AtomicU8::new(0),
             running: std::sync::atomic::AtomicBool::new(false),
-        })
+        };
+        app.upgrade_bundled_catalog(&seed)?;
+        Ok(app)
+    }
+    fn upgrade_bundled_catalog(&self, seed: &Path) -> Result<()> {
+        let registry = self.registry()?;
+        let migrated: bool = registry
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM app_migrations WHERE name='bundled-catalog-5')",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(err)?;
+        if migrated {
+            return Ok(());
+        }
+        let bundled = ro(seed)?;
+        let modern: bool = bundled
+            .query_row(
+                "SELECT value='headings-v2' FROM meta WHERE key='outline_format'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(false);
+        if !modern {
+            return Ok(());
+        }
+        let (current, _) = self.version(0)?;
+        let built: String = current
+            .query_row("SELECT value FROM meta WHERE key='built_at'", [], |r| {
+                r.get(0)
+            })
+            .unwrap_or_default();
+        // Upgrade only the exact original bundled catalog. Keep its snapshot;
+        // never replace a user's downloaded/imported index or personal overlay.
+        if built == "2026-11-15T17:44:15.135376218+00:00" {
+            self.activate(seed, "Bundled catalog 5.0", true, false)?;
+        }
+        registry
+            .execute(
+                "INSERT OR IGNORE INTO app_migrations VALUES('bundled-catalog-5')",
+                [],
+            )
+            .map_err(err)?;
+        Ok(())
     }
     pub fn registry(&self) -> Result<Connection> {
         Connection::open(self.dir.join("catalog.sqlite")).map_err(err)
@@ -102,6 +151,7 @@ impl App {
             [self.dir.join("catalog.sqlite").to_string_lossy().as_ref()],
         )
         .map_err(err)?;
+        db.execute_batch("CREATE TEMP VIEW navigation_nodes AS SELECT *, CASE WHEN name GLOB 'section:*' THEN 'section' WHEN name IN ('tag_groups','pool_groups') OR name GLOB 'tag_group:*' OR name GLOB 'pool_group:*' OR name GLOB 'list_of_*' OR name GLOB 'help:*' OR name GLOB 'howto:*' OR name GLOB 'about:*' OR name GLOB 'template:*' THEN 'group' ELSE 'tag' END AS nav_kind FROM nodes;").map_err(err)?;
         Ok(())
     }
     pub fn dispatch(self: &std::sync::Arc<Self>, op: &str, a: &Value) -> Result<Value> {
@@ -125,6 +175,21 @@ impl App {
         match op {
             "meta" => self.meta(),
             "children" => self.children(text(a, "name"), v),
+            "outline" => {
+                let (db, _) = self.version(v)?;
+                self.attach(&db)?;
+                serde_json::to_value(crate::navigation::outline(
+                    &db,
+                    if text(a, "name").is_empty() {
+                        "tag_groups"
+                    } else {
+                        text(a, "name")
+                    },
+                )?)
+                .map_err(err)
+            }
+            "favorites" => self.favorites(),
+            "favorite" => self.favorite(a),
             "node" => self.node(text(a, "name"), v),
             "search" => self.search(text(a, "query"), text(a, "kind"), v),
             "edit" => {
@@ -175,6 +240,85 @@ impl App {
             out.push(json!({"version":id,"label":label,"created":created,"protected":protected,"current":current,"tags":stats[0],"categories":stats[1],"relationships":stats[2],"bytes":fs::metadata(p).map_err(err)?.len()}));
         }
         Ok(json!({"snapshots":out}))
+    }
+    fn favorites(&self) -> Result<Value> {
+        let db = self.registry()?;
+        let mut stmt = db
+            .prepare("SELECT record FROM favorites ORDER BY name")
+            .map_err(err)?;
+        let records = stmt.query_map([], |r| r.get::<_, String>(0)).map_err(err)?;
+        let mut out = vec![];
+        for record in records {
+            out.push(serde_json::from_str::<Value>(&record.map_err(err)?).map_err(err)?);
+        }
+        Ok(json!(out))
+    }
+    fn favorite(&self, a: &Value) -> Result<Value> {
+        let name = text(a, "name");
+        if a["remove"] == true {
+            self.registry()?
+                .execute("DELETE FROM favorites WHERE name=?", [name])
+                .map_err(err)?;
+        } else {
+            let mut record = self.node(name, a["version"].as_i64().unwrap_or(0))?;
+            if crate::navigation::kind(name) != "tag"
+                || record["kind"] == "section"
+                || record["custom"] == true && record["kind"] != "tag"
+            {
+                return Err("Only tags can be starred".into());
+            }
+            let (db, _) = self.version(a["version"].as_i64().unwrap_or(0))?;
+            self.attach(&db)?;
+            let mut paths = vec![];
+            if let Some(path) = a["path"].as_array().filter(|p| !p.is_empty()) {
+                paths.push(json!(path
+                    .iter()
+                    .filter(|p| text(p, "name") != "tag_groups")
+                    .map(|p| json!({"name":text(p,"name"),"display":text(p,"display")}))
+                    .collect::<Vec<_>>()));
+            }
+            // Save a canonical folder path too, including for search results.
+            let mut queue =
+                std::collections::VecDeque::from([(name.to_string(), Vec::<Value>::new())]);
+            let mut seen = std::collections::HashSet::new();
+            while let Some((current, path)) = queue.pop_front() {
+                if !seen.insert(current.clone()) || seen.len() > 10000 {
+                    continue;
+                }
+                if current == "tag_groups" {
+                    let mut path = path;
+                    path.reverse();
+                    let p = json!(path);
+                    if !paths.contains(&p) {
+                        paths.push(p);
+                    }
+                    break;
+                }
+                let mut stmt=db.prepare("SELECT DISTINCT p.name,p.display_name FROM edges e JOIN nodes n ON n.id=e.child_id JOIN nodes p ON p.id=e.parent_id WHERE n.name=? AND (e.edge_type IN ('child','related') OR p.kind='section') ORDER BY e.position").map_err(err)?;
+                for parent in stmt
+                    .query_map([&current], |r| {
+                        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                    })
+                    .map_err(err)?
+                {
+                    let (p, label) = parent.map_err(err)?;
+                    let mut next = path.clone();
+                    if p != "tag_groups" {
+                        next.push(json!({"name":p,"display":label}));
+                    }
+                    queue.push_back((p, next));
+                }
+            }
+            record["paths"] = json!(paths);
+            record["savedAt"] = json!(now());
+            self.registry()?
+                .execute(
+                    "INSERT INTO favorites VALUES(?1,?2) ON CONFLICT(name) DO NOTHING",
+                    params![name, record.to_string()],
+                )
+                .map_err(err)?;
+        }
+        self.favorites()
     }
     fn children(&self, name: &str, v: i64) -> Result<Value> {
         let (db, _) = self.version(v)?;
@@ -329,13 +473,13 @@ impl App {
         if query.is_empty() {
             return Ok(json!([]));
         }
-        let mut stmt=db.prepare("SELECT n.name,n.display_name,n.kind,n.coverage,n.child_count FROM nodes_fts JOIN nodes n ON n.id=nodes_fts.rowid WHERE nodes_fts MATCH ?1 AND (?2='' OR n.kind=?2 OR (?2='group' AND n.kind='section')) ORDER BY rank LIMIT 80").map_err(err)?;
+        let mut stmt=db.prepare("SELECT n.name,n.display_name,n.nav_kind,n.coverage,n.child_count FROM nodes_fts JOIN navigation_nodes n ON n.id=nodes_fts.rowid WHERE nodes_fts MATCH ?1 AND (?2='' OR n.nav_kind=?2 OR (?2='group' AND n.nav_kind='section')) ORDER BY (n.name=replace(lower(?3),' ','_')) DESC,rank LIMIT 80").map_err(err)?;
         let mut out = stmt
-            .query_map([query.as_str(), kind], summary)
+            .query_map([query.as_str(), kind, q.trim()], summary)
             .map_err(err)?
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(err)?;
-        let mut stmt=db.prepare("SELECT c.name,c.display,c.kind,'full',0 FROM overlay.custom c LEFT JOIN overlay.edits e ON e.name=c.name WHERE (instr(lower(c.name),lower(?1)) OR instr(lower(c.display),lower(?1)) OR instr(lower(coalesce(e.description,c.description)),lower(?1))) AND (?2='' OR c.kind=?2) UNION SELECT n.name,n.display_name,n.kind,n.coverage,n.child_count FROM nodes n JOIN overlay.edits e ON n.name=e.name WHERE instr(lower(e.description),lower(?1)) AND (?2='' OR n.kind=?2 OR (?2='group' AND n.kind='section')) LIMIT 80").map_err(err)?;
+        let mut stmt=db.prepare("SELECT c.name,c.display,c.kind,'full',0 FROM overlay.custom c LEFT JOIN overlay.edits e ON e.name=c.name WHERE (instr(lower(c.name),lower(?1)) OR instr(lower(c.display),lower(?1)) OR instr(lower(coalesce(e.description,c.description)),lower(?1))) AND (?2='' OR c.kind=?2) UNION SELECT n.name,n.display_name,n.nav_kind,n.coverage,n.child_count FROM navigation_nodes n JOIN overlay.edits e ON n.name=e.name WHERE instr(lower(e.description),lower(?1)) AND (?2='' OR n.nav_kind=?2 OR (?2='group' AND n.nav_kind='section')) LIMIT 80").map_err(err)?;
         for row in stmt.query_map([q, kind], summary).map_err(err)? {
             let row = row.map_err(err)?;
             if !out.iter().any(|n| n["name"] == row["name"]) {
@@ -670,7 +814,12 @@ impl App {
     fn overlay_json(&self) -> Result<Value> {
         let r = self.registry()?;
         let mut out = json!({});
-        for (table, columns) in [("custom", 4), ("edits", 2), ("custom_edges", 3)] {
+        for (table, columns) in [
+            ("custom", 4),
+            ("edits", 2),
+            ("custom_edges", 3),
+            ("favorites", 2),
+        ] {
             let mut stmt = r.prepare(&format!("SELECT * FROM {table}")).map_err(err)?;
             let rows = stmt
                 .query_map([], |r| {
@@ -723,14 +872,30 @@ impl App {
             }
             let mut r = self.registry()?;
             let tx = r.transaction().map_err(err)?;
-            for (table, columns) in [("custom", 4), ("edits", 2), ("custom_edges", 3)] {
-                let rows = m["overlay"][table].as_array().ok_or("Invalid overlay")?;
+            for (table, columns) in [
+                ("custom", 4),
+                ("edits", 2),
+                ("custom_edges", 3),
+                ("favorites", 2),
+            ] {
+                let empty = vec![];
+                let rows = if table == "favorites" && m["overlay"][table].is_null() {
+                    &empty
+                } else {
+                    m["overlay"][table].as_array().ok_or("Invalid overlay")?
+                };
                 for row in rows {
                     let vals = row.as_array().ok_or("Invalid overlay row")?;
                     if vals.len() != columns || vals.iter().any(|v| !v.is_string()) {
                         return Err("Invalid overlay values".into());
                     }
                     let values = vals.iter().map(|v| v.as_str().unwrap()).collect::<Vec<_>>();
+                    if table == "favorites" {
+                        let record: Value = serde_json::from_str(&values[1]).map_err(err)?;
+                        if text(&record, "name") != values[0] || !record["paths"].is_array() {
+                            return Err("Invalid favorite record".into());
+                        }
+                    }
                     if table == "custom" && !["tag", "group"].contains(&values[2]) {
                         return Err("Invalid custom type".into());
                     }
@@ -802,7 +967,7 @@ impl App {
 }
 fn summary(r: &rusqlite::Row) -> rusqlite::Result<Value> {
     Ok(
-        json!({"name":r.get::<_,String>(0)?,"display":r.get::<_,String>(1)?,"kind":r.get::<_,String>(2)?,"coverage":r.get::<_,String>(3)?,"children":r.get::<_,i64>(4)?}),
+        json!({"name":r.get::<_,String>(0)?,"display":r.get::<_,String>(1)?,"kind":crate::navigation::kind(&r.get::<_,String>(0)?),"coverage":r.get::<_,String>(3)?,"children":r.get::<_,i64>(4)?}),
     )
 }
 fn lookup(db: &Connection, name: &str) -> Result<Option<Value>> {
@@ -824,6 +989,14 @@ fn lookup(db: &Connection, name: &str) -> Result<Option<Value>> {
         .map_err(err)?;
     if let Some(ref mut c) = custom {
         c["custom"] = json!(true);
+        c["kind"] = db
+            .query_row(
+                "SELECT kind FROM overlay.custom WHERE name=?",
+                [name],
+                |r| r.get::<_, String>(0),
+            )
+            .map(Value::String)
+            .map_err(err)?;
         c["children"] = base
             .as_ref()
             .map(|b| b["children"].clone())
@@ -999,6 +1172,90 @@ mod tests {
             "Original description"
         );
         assert_eq!(call(&a, "job", json!({}))["status"], "idle");
+    }
+    #[test]
+    fn favorites_preserve_description_paths_restart_and_backup() {
+        let (tmp, a) = fixture();
+        let saved = call(
+            &a,
+            "favorite",
+            json!({"name":"tag_4","path":[{"name":"old_folder","display":"Original folder"}]}),
+        );
+        assert_eq!(saved[0]["paths"][0][0]["display"], "Original folder");
+        call(
+            &a,
+            "edit",
+            json!({"name":"tag_4","description":"Later edit"}),
+        );
+        call(&a, "snapshot", json!({"version":1,"action":"restore"}));
+        assert_eq!(call(&a, "favorites", json!({})), saved);
+        let backup = tmp.path().join("favorites.zip");
+        call(&a, "export", json!({"mode":"overlay","path":backup}));
+        call(&a, "favorite", json!({"name":"tag_4","remove":true}));
+        assert_eq!(call(&a, "favorites", json!({})), json!([]));
+        call(&a, "import", json!({"path":backup,"overwrite":true}));
+        assert_eq!(call(&a, "favorites", json!({})), saved);
+        let dir = a.dir.clone();
+        drop(a);
+        let reopened = Arc::new(App::new(dir, tmp.path().join("seed.sqlite")).unwrap());
+        assert_eq!(call(&reopened, "favorites", json!({})), saved);
+        assert!(reopened
+            .dispatch("favorite", &json!({"name":"tag_groups"}))
+            .is_err());
+    }
+    #[test]
+    fn bundled_upgrade_keeps_old_snapshot_favorites_and_manual_indexes() {
+        for original in [
+            "2026-11-15T17:44:15.135376218+00:00",
+            "user-downloaded-index",
+        ] {
+            let (tmp, app) = fixture();
+            call(
+                &app,
+                "favorite",
+                json!({"name":"tag_4","path":[{"name":"folder","display":"Saved folder"}]}),
+            );
+            let saved = call(&app, "favorites", json!({}));
+            let dir = app.dir.clone();
+            Connection::open(dir.join("versions/v1.sqlite"))
+                .unwrap()
+                .execute("INSERT INTO meta VALUES('built_at',?)", [original])
+                .unwrap();
+            let seed = tmp.path().join("seed.sqlite");
+            let new = Connection::open(&seed).unwrap();
+            new.execute_batch("INSERT INTO meta VALUES('outline_format','headings-v2'),('built_at','rebuilt'); UPDATE nodes SET description='Rebuilt wiki' WHERE name='tag_4';").unwrap();
+            drop(new);
+            drop(app);
+            let upgraded = Arc::new(App::new(dir.clone(), seed.clone()).unwrap());
+            assert_eq!(call(&upgraded, "favorites", json!({})), saved);
+            assert_eq!(
+                call(&upgraded, "node", json!({"name":"tag_4","version":1}))["description"],
+                "Original description"
+            );
+            let should_upgrade = original.starts_with("2026-");
+            assert_eq!(
+                call(&upgraded, "meta", json!({}))["snapshots"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                if should_upgrade { 2 } else { 1 }
+            );
+            if should_upgrade {
+                assert_eq!(
+                    call(&upgraded, "node", json!({"name":"tag_4"}))["description"],
+                    "Rebuilt wiki"
+                );
+                call(
+                    &upgraded,
+                    "snapshot",
+                    json!({"version":1,"action":"restore"}),
+                );
+                let before = call(&upgraded, "meta", json!({}));
+                drop(upgraded);
+                let reopened = Arc::new(App::new(dir, seed).unwrap());
+                assert_eq!(call(&reopened, "meta", json!({})), before);
+            }
+        }
     }
     #[test]
     fn protection_restore_retention_and_comparison() {

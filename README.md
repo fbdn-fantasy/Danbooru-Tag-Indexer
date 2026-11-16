@@ -9,11 +9,13 @@ Supports Windows and Linux.
 - Offline tag browsing and searching.
 - Hierarchical categories and nested subgroups.
 - Tag descriptions and relationships.
+- Favorite tags for quick and easy access.
 - Custom entries, descriptions, and connections.
 - Manual index updates using the **Update Index** button.
 - Index version history with protected snapshots.
 - Import and export functionality.
 - Light and dark themes.
+- Bug fixes and stability improvements.
 
 ## Installation
 
@@ -21,31 +23,35 @@ Download the latest installer from the repository's **Releases** section.
 
 | Operating System | Package |
 |---|---|
-| Windows 11 (x64) | `.exe` |
-| Fedora (x86_64) | `.rpm` |
-| Debian / Ubuntu (x86_64) | `.deb` |
+| Windows 11 (x64) | `Danbooru-Tag-Indexer-5.0.0-x64-setup.exe` |
+| Fedora (x86_64) | `danbooru-tag-indexer-5.0.0-1.x86_64.rpm` |
+| Debian / Ubuntu (x86_64) | `danbooru-tag-indexer_5.0.0_amd64.deb` |
 
-Linux installation:
+### Linux Installation
 
 **Fedora**
 ```bash
-sudo dnf install ./danbooru-tag-indexer-4.0.0-1.x86_64.rpm
+sudo dnf install ./danbooru-tag-indexer-5.0.0-1.x86_64.rpm
 ```
 
 **Debian / Ubuntu**
 ```bash
-sudo apt install ./danbooru-tag-indexer_4.0.0_amd64.deb
+sudo apt install ./danbooru-tag-indexer_5.0.0_amd64.deb
 ```
 
 Linux requires glibc 2.39 or newer and WebKitGTK 4.1.
 
 ## Index Management
 
-The application includes an offline index.
+The application includes an offline tag index.
 
 Index updates only run when manually initiated using **Update Index**. Updates can be paused, resumed, cancelled, or retried.
 
 Custom entries and edits are preserved separately from index updates.
+
+## Favorites
+
+Tags can be marked as favorites for quick access without having to search for them again.
 
 ## Support
 
